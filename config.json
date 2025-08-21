@@ -1,0 +1,46 @@
+{
+  "voipstudio": {
+    "api_base_url": "https://voipstudio.com/api/v2",
+    "call_timeout_seconds": 300,
+    "poll_interval_seconds": 2,
+    "max_call_retries": 3
+  },
+  "google_calendar": {
+    "credentials_file": "credentials.json",
+    "token_file": "token.json",
+    "default_callback_time": "10:00",
+    "callback_duration_minutes": 30,
+    "meeting_duration_minutes": 60,
+    "timezone": "America/New_York",
+    "enable_attendee_invitations": true,
+    "reminder_minutes": [15, 5]
+  },
+  "csv_settings": {
+    "backup_directory": "backups",
+    "archive_file": "archive.csv",
+    "max_backups": 50,
+    "encoding": "utf-8"
+  },
+  "ui_settings": {
+    "records_per_search_page": 20,
+    "max_note_display_length": 200,
+    "show_additional_fields": true,
+    "clear_screen": true
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "vstudio_cli.log",
+    "max_file_size_mb": 10,
+    "backup_count": 3
+  },
+  "operation_queue": {
+    "queue_file": "operation_queue.json",
+    "max_retry_attempts": 3,
+    "retry_delay_seconds": 5
+  },
+  "phone_normalization": {
+    "default_country_code": "US",
+    "allow_invalid_numbers": false,
+    "format_display": "E164"
+  }
+}
