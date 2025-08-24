@@ -1,0 +1,20 @@
+{
+  "use_mongodb": true,
+  "mongodb_uri": "mongodb://localhost:27017/",
+  "database_name": "vstudio_crm",
+  "csv_backup_enabled": true,
+  "csv_export_path": "data_export.csv",
+  "auto_migrate": false,
+  "connection_settings": {
+    "server_selection_timeout_ms": 5000,
+    "connect_timeout_ms": 10000,
+    "socket_timeout_ms": 5000,
+    "max_pool_size": 10,
+    "min_pool_size": 1
+  },
+  "migration_settings": {
+    "backup_original_csv": true,
+    "validate_data_integrity": true,
+    "batch_size": 1000
+  }
+}

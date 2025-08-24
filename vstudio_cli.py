@@ -50,6 +50,13 @@ except ImportError as e:
 # Load environment variables
 load_dotenv()
 
+# Import our database manager
+try:
+    from database import CRMDataManager, DatabaseConfig, load_database_config
+    DATABASE_INTEGRATION = True
+except ImportError:
+    DATABASE_INTEGRATION = False
+
 # Configuration constants
 API_BASE_URL = "https://l7api.com/v1.2/voipstudio"
 KEYRING_SERVICE = "vstudio-cli"
@@ -606,6 +613,12 @@ class VStudioCLI:
         self.current_call_id = None
         self.operation_queue = OperationQueue()
         self.debug = debug
+        self.testing_mode = False
+        self.current_view = "all"  # all, today, overdue, new
+        
+        # Database integration
+        self.db_manager = None
+        self.use_database = DATABASE_INTEGRATION
         
         # Setup logging
         log_level = logging.DEBUG if debug else logging.INFO
@@ -665,16 +678,17 @@ class VStudioCLI:
         if self.debug:
             self.console.print("[cyan]🐛 Debug mode enabled[/cyan]")
         
-        # Get CSV path
-        if not csv_path:
-            csv_path = Prompt.ask("Enter CSV file path")
+        # Initialize database if available and enabled
+        if DATABASE_INTEGRATION and self.use_database:
+            self._initialize_database()
         
-        self.csv_path = Path(csv_path)
-        if not self.csv_path.exists():
-            raise FileNotFoundError(f"CSV file not found: {csv_path}")
-        
-        # Load and validate CSV
-        self._load_csv()
+        # If database is working, use it; otherwise fall back to CSV
+        if self.db_manager:
+            self.console.print("[green]🗄️  Using MongoDB database backend[/green]")
+            self._load_from_database()
+        else:
+            self.console.print("[yellow]📄 Using CSV backend[/yellow]")
+            self._initialize_csv_mode(csv_path)
         
         # Setup authentication
         self._setup_auth()
@@ -687,6 +701,79 @@ class VStudioCLI:
         
         # Create necessary directories
         Path(BACKUP_DIR).mkdir(exist_ok=True)
+    
+    def _initialize_database(self):
+        """Initialize database connection."""
+        try:
+            config = load_database_config()
+            
+            # Override database name for testing mode
+            if self.testing_mode:
+                config.database_name = "vstudio_crm_test"
+                config.use_mongodb = True
+            
+            self.db_manager = CRMDataManager(config)
+            
+            # Test database connection by getting contacts
+            contacts = self.db_manager.get_contacts(limit=1)
+            self.console.print(f"[dim]Database connected - {len(self.db_manager.get_contacts())} contacts available[/dim]")
+            
+        except Exception as e:
+            self.logger.warning(f"Database initialization failed: {e}")
+            self.console.print(f"[yellow]⚠️  Database unavailable, falling back to CSV mode[/yellow]")
+            self.db_manager = None
+    
+    def _load_from_database(self):
+        """Load data from database."""
+        try:
+            # Get contacts from database
+            contacts = self.db_manager.get_contacts()
+            
+            # Convert to the format expected by the existing UI code
+            self.data = []
+            for contact in contacts:
+                # Convert MongoDB document to CSV-like format for compatibility
+                csv_record = {
+                    'external_row_id': contact.get('external_row_id', str(contact.get('_id', ''))),
+                    'phone_number': contact.get('phone_number', ''),
+                    'name': contact.get('name', ''),
+                    'email': contact.get('email', ''),
+                    'company': contact.get('company', ''),
+                    'title': contact.get('title', ''),
+                    'address': contact.get('address', ''),
+                    'city': contact.get('city', ''),
+                    'source': contact.get('source', ''),
+                    'status': contact.get('status', 'new'),
+                    'notes': '',  # Will be populated from interactions if needed
+                    'last_call_at': '',
+                    'callback_on': '',
+                    'meeting_at': '',
+                    'gcal_callback_event_id': '',
+                    'gcal_meeting_event_id': ''
+                }
+                self.data.append(csv_record)
+            
+            # Set up headers for CSV compatibility
+            self.headers = list(csv_record.keys()) if self.data else []
+            
+            self.console.print(f"[green]✓ Loaded {len(self.data)} contacts from database[/green]")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to load from database: {e}")
+            raise ValueError(f"Database loading failed: {e}")
+    
+    def _initialize_csv_mode(self, csv_path: Optional[str] = None):
+        """Initialize CSV mode."""
+        # Get CSV path
+        if not csv_path:
+            csv_path = Prompt.ask("Enter CSV file path")
+        
+        self.csv_path = Path(csv_path)
+        if not self.csv_path.exists():
+            raise FileNotFoundError(f"CSV file not found: {csv_path}")
+        
+        # Load and validate CSV
+        self._load_csv()
     
     def _load_csv(self):
         """Load and validate the CSV file."""
@@ -711,7 +798,7 @@ class VStudioCLI:
         managed_columns = [
             'status', 'last_call_at', 'callback_on', 'meeting_at', 'notes',
             'gcal_callback_event_id', 'gcal_meeting_event_id', 'gcal_calendar_id',
-            'external_row_id', 'last_sms_at', 'sms_history'
+            'external_row_id', 'last_sms_at', 'sms_history', 'address'
         ]
         
         for col in managed_columns:
@@ -910,6 +997,22 @@ class VStudioCLI:
             f"[{status_color}]{status.replace('_', ' ').title()}[/{status_color}]"
         ]
         
+        # Add current view if using database
+        if self.db_manager:
+            view_labels = {
+                "all": "[blue]All[/blue]",
+                "today": "[green]Today[/green]", 
+                "overdue": "[red]Overdue[/red]",
+                "new": "[yellow]New[/yellow]"
+            }
+            view_label = view_labels.get(self.current_view, self.current_view.title())
+            header_parts.append(f"View: {view_label}")
+        
+        # Add urgency information for overdue items
+        urgency_info = self._get_urgency_info(record)
+        if urgency_info:
+            header_parts.append(urgency_info)
+        
         # Add timing information
         if record.get('last_call_at'):
             try:
@@ -943,6 +1046,7 @@ class VStudioCLI:
             ('phone_number', 'phone_number'),
             ('Email', 'email'),
             ('Title', 'title'),
+            ('Address', 'address'),
             ('City', 'city'),
             ('Source', 'source')
         ]
@@ -969,7 +1073,7 @@ class VStudioCLI:
         
         # Show any additional fields not covered above
         other_fields = []
-        standard_fields = {'name', 'company', 'phone_number', 'email', 'title', 'city', 'source', 
+        standard_fields = {'name', 'company', 'phone_number', 'email', 'title', 'city', 'address', 'source', 
                           'notes', 'status', 'last_call_at', 'callback_on', 'meeting_at',
                           'gcal_callback_event_id', 'gcal_meeting_event_id', 'gcal_calendar_id',
                           'external_row_id'}
@@ -1000,6 +1104,104 @@ class VStudioCLI:
             'invalid_phone': "magenta"
         }
         return status_colors.get(status, "white")
+    
+    def _get_urgency_info(self, record: Dict) -> str:
+        """Get urgency information for overdue items."""
+        today = datetime.now().date()
+        
+        # Check for overdue callback
+        if record.get('callback_on'):
+            try:
+                callback_date = datetime.fromisoformat(record['callback_on']).date()
+                if callback_date < today:
+                    days_overdue = (today - callback_date).days
+                    if days_overdue == 1:
+                        return "[bold red]🔥 1 day overdue[/bold red]"
+                    elif days_overdue <= 3:
+                        return f"[red]⚠️  {days_overdue} days overdue[/red]"
+                    else:
+                        return f"[bold red]‼️  {days_overdue} days overdue[/bold red]"
+                elif callback_date == today:
+                    return "[bold green]📞 Due today[/bold green]"
+            except:
+                pass
+        
+        # Check for overdue meeting
+        if record.get('meeting_at'):
+            try:
+                meeting_datetime = datetime.fromisoformat(record['meeting_at'])
+                meeting_date = meeting_datetime.date()
+                if meeting_date < today:
+                    days_overdue = (today - meeting_date).days
+                    if days_overdue == 1:
+                        return "[bold red]🔥 Meeting 1 day overdue[/bold red]"
+                    elif days_overdue <= 3:
+                        return f"[red]⚠️  Meeting {days_overdue} days overdue[/red]"
+                    else:
+                        return f"[bold red]‼️  Meeting {days_overdue} days overdue[/bold red]"
+                elif meeting_date == today:
+                    time_str = meeting_datetime.strftime('%I:%M %p')
+                    return f"[bold green]📅 Meeting today at {time_str}[/bold green]"
+            except:
+                pass
+        
+        return ""
+    
+    def _sort_data_by_priority(self, data: List[Dict], view_name: str) -> List[Dict]:
+        """Sort data based on priority for the current view."""
+        today = datetime.now().date()
+        
+        def priority_key(record):
+            if view_name == "overdue":
+                # Sort overdue items by days overdue (most overdue first)
+                callback_days = 0
+                meeting_days = 0
+                
+                if record.get('callback_on'):
+                    try:
+                        callback_date = datetime.fromisoformat(record['callback_on']).date()
+                        if callback_date < today:
+                            callback_days = (today - callback_date).days
+                    except:
+                        pass
+                
+                if record.get('meeting_at'):
+                    try:
+                        meeting_date = datetime.fromisoformat(record['meeting_at']).date()
+                        if meeting_date < today:
+                            meeting_days = (today - meeting_date).days
+                    except:
+                        pass
+                
+                return -(max(callback_days, meeting_days))  # Negative for descending sort
+                
+            elif view_name == "today":
+                # Sort today's items by time (earliest first)
+                earliest_time = datetime.max.time()
+                
+                if record.get('callback_on'):
+                    try:
+                        callback_date = datetime.fromisoformat(record['callback_on']).date()
+                        if callback_date == today:
+                            earliest_time = min(earliest_time, datetime.min.time().replace(hour=10))  # Default callback time
+                    except:
+                        pass
+                
+                if record.get('meeting_at'):
+                    try:
+                        meeting_datetime = datetime.fromisoformat(record['meeting_at'])
+                        if meeting_datetime.date() == today:
+                            earliest_time = min(earliest_time, meeting_datetime.time())
+                    except:
+                        pass
+                
+                return earliest_time
+                
+            else:
+                # Default sorting by company name
+                return record.get('company', '').lower()
+        
+        return sorted(data, key=priority_key)
     
     def _format_notes(self, notes: str) -> str:
         """Format timestamped notes for display."""
@@ -1034,8 +1236,16 @@ class VStudioCLI:
     
     def _get_hotkey_footer(self) -> str:
         """Get the hotkey footer text."""
-        return """[bold cyan]1[/bold cyan] Call  [bold cyan]2[/bold cyan] Text  [bold cyan]3[/bold cyan] Next  [bold cyan]4[/bold cyan] Delete  [bold cyan]5[/bold cyan] Add Note
+        base_commands = """[bold cyan]1[/bold cyan] Call  [bold cyan]2[/bold cyan] Text  [bold cyan]3[/bold cyan] Next  [bold cyan]4[/bold cyan] Delete  [bold cyan]5[/bold cyan] Add Note
 [bold cyan]↑/k[/bold cyan] Prev  [bold cyan]↓/j[/bold cyan] Next  [bold cyan]/[/bold cyan] Search  [bold cyan]o[/bold cyan] Outcome  [bold cyan]q[/bold cyan] Quit"""
+        
+        # Add view switching commands if using database
+        if self.db_manager:
+            view_commands = """
+[bold green]t[/bold green] Today  [bold red]d[/bold red] Overdue  [bold yellow]n[/bold yellow] New  [bold blue]a[/bold blue] All"""
+            return base_commands + view_commands
+        
+        return base_commands
     
     def _get_user_input(self) -> str:
         """Get user input for action selection."""
@@ -1066,6 +1276,14 @@ class VStudioCLI:
             self._search()
         elif action == 'o':
             self._handle_call_outcome('manual')
+        elif action == 't' and self.db_manager:
+            self._switch_view('today')
+        elif action == 'd' and self.db_manager:
+            self._switch_view('overdue')
+        elif action == 'n' and self.db_manager:
+            self._switch_view('new')
+        elif action == 'a' and self.db_manager:
+            self._switch_view('all')
         else:
             self.console.print("[yellow]Unknown command[/yellow]")
     
@@ -1575,8 +1793,11 @@ class VStudioCLI:
             self.console.print(f"[red]Invalid phone number format: {phone_number}[/red]")
             return
         
-        # Get message from user
-        message = Prompt.ask("Enter SMS message")
+        # Get message from user with cancellation option
+        self.console.print(f"[cyan]Sending SMS to: {normalized_display or api_number}[/cyan]")
+        self.console.print("[dim]Press Enter with empty message to cancel[/dim]")
+        
+        message = Prompt.ask("Enter SMS message", default="")
         self._debug_print(f"Raw message input: {repr(message)} (type: {type(message)})")
         
         # Handle case where message might be a list or other type
@@ -1585,8 +1806,18 @@ class VStudioCLI:
         elif not isinstance(message, str):
             message = str(message)
         
+        # Check for cancellation (empty message)
         if not message.strip():
-            self.console.print("[yellow]No message entered[/yellow]")
+            self.console.print("[yellow]SMS cancelled[/yellow]")
+            return
+        
+        # Show confirmation before sending
+        self.console.print(f"\n[bold]SMS Preview:[/bold]")
+        self.console.print(f"[dim]To:[/dim] {normalized_display or api_number}")
+        self.console.print(f"[dim]Message:[/dim] {message}")
+        
+        if not Confirm.ask("\nSend this SMS?", default=False):
+            self.console.print("[yellow]SMS cancelled[/yellow]")
             return
         
         self.console.print(f"[yellow]Sending SMS to {normalized_display or api_number}...[/yellow]")
@@ -1681,6 +1912,19 @@ class VStudioCLI:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
         new_note = f"[{timestamp}] {note}"
         
+        if self.db_manager:
+            # Create interaction in database
+            contact_id = record.get('external_row_id')
+            if contact_id:
+                interaction_data = {
+                    'type': 'note',
+                    'timestamp': datetime.now(),
+                    'body': note,
+                    'direction': 'outbound'
+                }
+                self.db_manager.create_interaction(contact_id, interaction_data)
+        
+        # Also update the in-memory record for UI compatibility
         existing_notes = record.get('notes', '')
         if existing_notes:
             record['notes'] = f"{existing_notes}; {new_note}"
@@ -1703,7 +1947,7 @@ class VStudioCLI:
                 continue
             
             # Search in key fields
-            search_fields = ['phone_number', 'name', 'company', 'email', 'status', 'notes', 'title', 'city', 'source']
+            search_fields = ['phone_number', 'name', 'company', 'email', 'status', 'notes', 'title', 'address', 'city', 'source']
             match_found = False
             matched_fields = []
             
@@ -1793,7 +2037,45 @@ class VStudioCLI:
             writer.writerow(record)
     
     def _save_csv(self):
-        """Save the CSV with backup."""
+        """Save the data (to database if available, otherwise CSV)."""
+        if self.db_manager:
+            # Save to database
+            try:
+                # For database mode, we need to update the contact record
+                current_record = self.data[self.current_index]
+                contact_id = current_record.get('external_row_id')
+                
+                if contact_id:
+                    # Update the contact in database
+                    updates = {
+                        'status': current_record.get('status'),
+                        'metadata.updated_at': datetime.utcnow()
+                    }
+                    
+                    # Add any other changed fields
+                    for field in ['notes', 'last_call_at', 'callback_on', 'meeting_at']:
+                        if current_record.get(field):
+                            updates[field] = current_record[field]
+                    
+                    success = self.db_manager.update_contact(contact_id, updates)
+                    if success:
+                        self.logger.info("Contact updated in database")
+                    else:
+                        self.logger.warning("Failed to update contact in database")
+                        
+            except Exception as e:
+                self.logger.error(f"Database save failed: {e}")
+                # Fall back to CSV mode for this save
+                self._save_to_csv_file()
+        else:
+            # Save to CSV file
+            self._save_to_csv_file()
+    
+    def _save_to_csv_file(self):
+        """Save data to CSV file with backup."""
+        if not self.csv_path:
+            return
+            
         # Create backup
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = Path(BACKUP_DIR) / f"{self.csv_path.stem}_{timestamp}.csv"
@@ -1823,19 +2105,94 @@ class VStudioCLI:
                 self.console.print("[red]Failed to terminate call[/red]")
             self.current_call_id = None
     
+    def _switch_view(self, view_name: str):
+        """Switch to a different priority view."""
+        if not self.db_manager:
+            self.console.print("[red]Priority views only available with database backend[/red]")
+            return
+        
+        old_view = self.current_view
+        self.current_view = view_name
+        
+        try:
+            # Load data for the new view
+            if view_name == "today":
+                new_data = self.db_manager.get_priority_view_data("today")
+                view_label = "[green]Today's Schedule[/green]"
+            elif view_name == "overdue":
+                new_data = self.db_manager.get_priority_view_data("overdue")
+                view_label = "[red]Overdue Items[/red]"
+            elif view_name == "new":
+                new_data = self.db_manager.get_priority_view_data("new")
+                view_label = "[yellow]New Contacts[/yellow]"
+            else:  # "all"
+                new_data = self.db_manager.get_contacts()
+                view_label = "[blue]All Contacts[/blue]"
+            
+            if not new_data:
+                self.console.print(f"[yellow]No contacts found in {view_label} view[/yellow]")
+                self.current_view = old_view  # Revert to old view
+                return
+            
+            # Convert database records to CSV format for compatibility
+            self.data = []
+            for contact in new_data:
+                csv_record = {
+                    'external_row_id': contact.get('external_row_id', str(contact.get('_id', ''))),
+                    'phone_number': contact.get('phone_number', ''),
+                    'name': contact.get('name', ''),
+                    'email': contact.get('email', ''),
+                    'company': contact.get('company', ''),
+                    'title': contact.get('title', ''),
+                    'address': contact.get('address', ''),
+                    'city': contact.get('city', ''),
+                    'source': contact.get('source', ''),
+                    'status': contact.get('status', 'new'),
+                    'notes': '',  # Will be populated from interactions if needed
+                    'last_call_at': '',
+                    'callback_on': contact.get('callback_on', ''),
+                    'meeting_at': contact.get('meeting_at', ''),
+                    'gcal_callback_event_id': '',
+                    'gcal_meeting_event_id': ''
+                }
+                self.data.append(csv_record)
+            
+            # Sort data based on priority for the view
+            self.data = self._sort_data_by_priority(self.data, view_name)
+            
+            # Reset to first record
+            self.current_index = 0
+            
+            self.console.print(f"[cyan]Switched to {view_label} - {len(self.data)} contacts[/cyan]")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to switch to {view_name} view: {e}")
+            self.console.print(f"[red]Failed to load {view_name} view[/red]")
+            self.current_view = old_view
+    
     def _cleanup(self):
         """Cleanup on exit."""
         if self.current_call_id and self.api_client:
             self.api_client.terminate_call(self.current_call_id)
+        
+        # Close database connection
+        if self.db_manager:
+            self.db_manager.close()
+            
         self.console.print("[green]Goodbye![/green]")
 
 
 def main():
     """Main entry point."""
-    parser = argparse.ArgumentParser(description="VStudio CLI - VoIP Call Management")
-    parser.add_argument("csv_file", nargs="?", help="Path to CSV file")
+    parser = argparse.ArgumentParser(
+        description="VStudio CLI - VoIP Call Management with MongoDB CRM backend",
+        epilog="If no CSV file is provided, the app will attempt to use the MongoDB database backend."
+    )
+    parser.add_argument("csv_file", nargs="?", help="Path to CSV file (optional if using database)")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
     parser.add_argument("-d", "--debug", action="store_true", help="Debug mode with detailed call information")
+    parser.add_argument("--csv-only", action="store_true", help="Force CSV mode even if database is available")
+    parser.add_argument("--testing", action="store_true", help="Use test database (vstudio_crm_test) for development and testing")
     
     args = parser.parse_args()
     
@@ -1843,6 +2200,16 @@ def main():
         logging.getLogger().setLevel(logging.DEBUG)
     
     app = VStudioCLI(debug=args.debug)
+    
+    # Handle testing mode
+    if args.testing:
+        app.testing_mode = True
+        app.console.print("[bold yellow]🧪 TESTING MODE - Using test database (vstudio_crm_test)[/bold yellow]")
+    
+    # Force CSV mode if requested
+    if args.csv_only:
+        app.use_database = False
+    
     app.run(args.csv_file)
 
 

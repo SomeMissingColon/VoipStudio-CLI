@@ -9,6 +9,7 @@ A comprehensive VoIP call management application built according to the detailed
 - **Call initiation** with automatic phone number normalization (E.164 format)
 - **Live call monitoring** with real-time status updates and timer
 - **Call termination** support with graceful shutdown
+- **SMS messaging** with cancellation options and confirmation prompts
 - **Retry logic** and connection error handling
 
 ### 📋 CSV Data Management
@@ -44,6 +45,9 @@ A comprehensive VoIP call management application built according to the detailed
 - **Status-based color coding** for easy visual identification
 - **Responsive layout** adapting to terminal size
 - **Clear command hints** and help text
+- **Cancellation-friendly workflows** with multiple exit points for accidental selections
+- **Priority views** with hotkey navigation (Today, Overdue, New, All)
+- **Urgency indicators** with emoji and color coding for overdue items
 
 ### 🔍 Enhanced Search & Navigation
 - **Multi-field search** across name, company, phone, email, notes, status
@@ -70,7 +74,8 @@ A comprehensive VoIP call management application built according to the detailed
 - **Secure credential storage** using OS keychain
 - **Interactive setup script** for first-time users
 - **Flexible configuration** via JSON config file
-- **Command-line options** including verbose mode
+- **Command-line options** including verbose mode and testing mode
+- **Test database support** with --testing flag for safe development
 - **Comprehensive documentation** and usage examples
 
 ## 🎯 Key Architecture Decisions

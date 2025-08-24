@@ -1,0 +1,8 @@
+{
+  "use_mongodb": true,
+  "mongodb_uri": "mongodb://localhost:27017/",
+  "database_name": "vstudio_crm_test",
+  "csv_backup_enabled": true,
+  "csv_export_path": "test_data_export.csv",
+  "auto_migrate": false
+}

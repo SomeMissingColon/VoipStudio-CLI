@@ -52,5 +52,8 @@ backups/
 archive.csv
 operation_queue.json
 
+# CSV files (contain sensitive data)
+*.csv
+
 # Temporary files
 *.tmp
