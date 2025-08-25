@@ -222,6 +222,85 @@ class CRMDataManager:
                     return record
             return None
     
+    def get_contacts_by_status(self, status: str) -> List[Dict]:
+        """Get all contacts with a specific status (convenience method)."""
+        return self.get_contacts(status_filter=status)
+    
+    def add_contact(self, contact_data: Dict) -> bool:
+        """Add a new contact to the database."""
+        if self.config.use_mongodb and self.mongodb:
+            return self._add_contact_mongodb(contact_data)
+        else:
+            return self._add_contact_csv(contact_data)
+    
+    def _add_contact_mongodb(self, contact_data: Dict) -> bool:
+        """Add contact to MongoDB."""
+        try:
+            collection = self.mongodb.db[CONTACTS_COLLECTION]
+            
+            # Add timestamp
+            contact_data['created_at'] = datetime.now()
+            contact_data['updated_at'] = datetime.now()
+            
+            # Ensure external_row_id is unique
+            if collection.find_one({'external_row_id': contact_data['external_row_id']}):
+                self.logger.error(f"Contact with external_row_id {contact_data['external_row_id']} already exists")
+                return False
+            
+            # Insert the contact
+            result = collection.insert_one(contact_data)
+            
+            if result.inserted_id:
+                self.logger.info(f"Contact {contact_data['name']} added successfully")
+                return True
+            else:
+                self.logger.error("Failed to insert contact")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Failed to add contact to MongoDB: {e}")
+            return False
+    
+    def _add_contact_csv(self, contact_data: Dict) -> bool:
+        """Add contact to CSV file."""
+        try:
+            # For CSV, we need to append to the file
+            csv_path = Path(self.config.csv_export_path)
+            
+            # Ensure the CSV headers match expected fields
+            expected_headers = [
+                'external_row_id', 'phone_number', 'name', 'email', 'company', 
+                'title', 'address', 'city', 'source', 'status', 'notes',
+                'callback_date', 'meeting_date', 'created_at', 'updated_at'
+            ]
+            
+            # Add timestamps
+            contact_data['created_at'] = datetime.now().isoformat()
+            contact_data['updated_at'] = datetime.now().isoformat()
+            
+            # Fill missing fields with empty strings
+            for header in expected_headers:
+                if header not in contact_data:
+                    contact_data[header] = ''
+            
+            # Check if file exists and create with headers if not
+            write_header = not csv_path.exists()
+            
+            with open(csv_path, 'a', newline='', encoding='utf-8') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=expected_headers)
+                
+                if write_header:
+                    writer.writeheader()
+                
+                writer.writerow({k: contact_data.get(k, '') for k in expected_headers})
+            
+            self.logger.info(f"Contact {contact_data['name']} added to CSV successfully")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Failed to add contact to CSV: {e}")
+            return False
+    
     def update_contact(self, contact_id: str, updates: Dict) -> bool:
         """Update a contact record."""
         if self.config.use_mongodb and self.mongodb:
@@ -232,14 +311,27 @@ class CRMDataManager:
     def _update_contact_mongodb(self, contact_id: str, updates: Dict) -> bool:
         """Update contact in MongoDB."""
         try:
-            from bson import ObjectId
             collection = self.mongodb.db[CONTACTS_COLLECTION]
             
             # Add update timestamp
             updates["metadata.updated_at"] = datetime.utcnow()
             
+            # Try to find by ObjectId first (if contact_id looks like ObjectId)
+            if len(contact_id) == 24:
+                try:
+                    from bson import ObjectId
+                    result = collection.update_one(
+                        {"_id": ObjectId(contact_id)},
+                        {"$set": updates}
+                    )
+                    if result.modified_count > 0:
+                        return True
+                except:
+                    pass  # Fall through to external_row_id search
+            
+            # Try to find by external_row_id
             result = collection.update_one(
-                {"_id": ObjectId(contact_id)},
+                {"external_row_id": contact_id},
                 {"$set": updates}
             )
             
